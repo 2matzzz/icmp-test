@@ -1,0 +1,9 @@
+general:
+  output: "json"  # "text" or "json"
+
+tests:
+  - name: "Google Echo Test"
+    dest: "8.8.8.8"
+    req: "echo"
+    timeout: "2s"
+    expected: "response"
