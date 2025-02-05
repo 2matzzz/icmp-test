@@ -139,8 +139,8 @@ type TestResult struct {
 	Timestamp   time.Time     `json:"timestamp"`
 }
 
-// runICMPTest sends an ICMP request and waits until a reply with the matching sequence is received.
-// It ignores any replies whose sequence number does not match until the deadline (timeout) is reached.
+// runICMPTest sends an ICMP request and waits until a reply with a matching (ID, Seq) is received.
+// It ignores any replies whose (ID, Seq) pair does not match the one sent. The overall timeout is applied.
 func runICMPTest(name, dest string, reqType, expectedType icmp.Type, timeout time.Duration, expectResponse bool, seq int) TestResult {
 	result := TestResult{
 		Name:        name,
@@ -209,7 +209,6 @@ func runICMPTest(name, dest string, reqType, expectedType icmp.Type, timeout tim
 		elapsed := time.Since(start)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// No matching message received before timeout.
 				if expectResponse {
 					result.Status = "FAILED"
 					result.Details = fmt.Sprintf("expected response, but timed out after %v waiting for matching message", timeout)
@@ -234,8 +233,7 @@ func runICMPTest(name, dest string, reqType, expectedType icmp.Type, timeout tim
 			continue
 		}
 
-		// Check if the message body is of type *icmp.Echo or *icmpTimestamp
-		// and if its ID and Seq match the ones we sent.
+		// Check if the received message matches our (ID, Seq).
 		matched := false
 		switch body := parsedMsg.Body.(type) {
 		case *icmp.Echo:
@@ -246,9 +244,18 @@ func runICMPTest(name, dest string, reqType, expectedType icmp.Type, timeout tim
 			if body.ID == id && body.Seq == seq {
 				matched = true
 			}
+		case *icmp.RawBody:
+			raw := body.Data
+			if len(raw) >= 4 {
+				replyID := int(raw[0])<<8 | int(raw[1])
+				replySeq := int(raw[2])<<8 | int(raw[3])
+				if replyID == id && replySeq == seq {
+					matched = true
+				}
+			}
 		}
 		if !matched {
-			// Not the reply for our message; ignore it.
+			// Not our message; ignore and keep waiting.
 			continue
 		}
 
@@ -387,7 +394,6 @@ func main() {
 
 			// Use (i+1) as the sequence number (unique per test).
 			seq := i + 1
-
 			res := runICMPTest(test.Name, test.Dest, reqType, expectedType, duration, expectResponse, seq)
 			results[i] = res
 			<-sem // release semaphore
