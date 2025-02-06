@@ -21,19 +21,29 @@ type GeneralConfig struct {
 	Parallelism int    `yaml:"parallelism"` // Number of tests to run concurrently
 }
 
-// Test defines the structure for a single test scenario.
+// TestInput defines the structure for a single test scenario.
+type TestInput struct {
+	Name           string `yaml:"name"`            // Test name
+	Destination    string `yaml:"dest"`            // Destination IP address
+	RequestType    string `yaml:"request_type"`    // Request type ("echo" or "timestamp")
+	ExpectedResult string `yaml:"expected_result"` // Expected result ("response" or "timeout")
+	Timeout        string `yaml:"timeout"`         // Timeout duration (e.g., "2s")
+}
+
 type Test struct {
-	Name     string `yaml:"name"`     // Test name
-	Dest     string `yaml:"dest"`     // Destination IP address
-	Req      string `yaml:"req"`      // Request type ("echo" or "timestamp")
-	Timeout  string `yaml:"timeout"`  // Timeout duration (e.g., "2s")
-	Expected string `yaml:"expected"` // Expected result ("response" or "timeout")
+	Name           string
+	Destination    string
+	ID             int
+	Seq            int
+	RequestType    ipv4.ICMPType
+	Timeout        time.Duration
+	ExpectedResult string
 }
 
 // Config defines the YAML configuration structure.
 type Config struct {
 	General GeneralConfig `yaml:"general"`
-	Tests   []Test        `yaml:"tests"`
+	Tests   []TestInput   `yaml:"tests"`
 }
 
 // icmpTimestamp represents the ICMP Timestamp message body.
@@ -46,6 +56,8 @@ type icmpTimestamp struct {
 	ReceiveTime   uint32
 	TransmitTime  uint32
 }
+
+var pid = os.Getpid() & 0xffff
 
 // Len returns the length of the ICMP Timestamp message body.
 func (t *icmpTimestamp) Len(_ int) int {
@@ -75,29 +87,24 @@ func (t *icmpTimestamp) Marshal(_ int) ([]byte, error) {
 }
 
 // icmpTypeToString converts an ICMP type to a descriptive string.
-func icmpTypeToString(t icmp.Type) string {
-	switch v := t.(type) {
-	case ipv4.ICMPType:
-		switch v {
-		case ipv4.ICMPTypeEcho:
-			return "echo request"
-		case ipv4.ICMPTypeEchoReply:
-			return "echo reply"
-		case ipv4.ICMPTypeTimestamp:
-			return "timestamp"
-		case ipv4.ICMPTypeTimestampReply:
-			return "timestamp reply"
-		default:
-			return fmt.Sprintf("type %d", int(v))
-		}
+func icmpTypeToString(t ipv4.ICMPType) string {
+	switch t {
+	case ipv4.ICMPTypeEcho:
+		return "echo request"
+	case ipv4.ICMPTypeEchoReply:
+		return "echo reply"
+	case ipv4.ICMPTypeTimestamp:
+		return "timestamp"
+	case ipv4.ICMPTypeTimestampReply:
+		return "timestamp reply"
 	default:
-		return fmt.Sprintf("%v", t)
+		return fmt.Sprintf("type %d", t.Protocol())
 	}
 }
 
 // createICMPMessage builds an ICMP message based on the provided request type,
 // using the given id and sequence number.
-func createICMPMessage(reqType icmp.Type, id, seq int) (*icmp.Message, error) {
+func createICMPMessage(reqType ipv4.ICMPType, id, seq int) (*icmp.Message, error) {
 	if reqType == ipv4.ICMPTypeEcho {
 		echo := &icmp.Echo{
 			ID:   id,
@@ -128,166 +135,140 @@ func createICMPMessage(reqType icmp.Type, id, seq int) (*icmp.Message, error) {
 
 // TestResult holds the result of a test scenario.
 type TestResult struct {
-	Name        string        `json:"name"`
-	Destination string        `json:"destination"`
-	RequestType string        `json:"request_type"`
-	Expected    string        `json:"expected"`
-	Actual      string        `json:"actual"`
-	Duration    time.Duration `json:"duration"`
-	Status      string        `json:"status"` // "PASSED" or "FAILED"
-	Details     string        `json:"details,omitempty"`
-	Timestamp   time.Time     `json:"timestamp"`
+	Name           string        `json:"name"`
+	Destination    string        `json:"destination"`
+	RequestType    string        `json:"request_type"`
+	ExpectedResult string        `json:"expected_result"`
+	ActualResult   string        `json:"actual_result"`
+	Duration       time.Duration `json:"duration"`
+	Status         string        `json:"status"` // "PASSED" or "FAILED"
+	Details        string        `json:"details,omitempty"`
+	Timestamp      time.Time     `json:"timestamp"`
 }
 
 // runICMPTest sends an ICMP request and waits until a reply with a matching (ID, Seq) is received.
 // It ignores any replies whose (ID, Seq) pair does not match the one sent. The overall timeout is applied.
-func runICMPTest(name, dest string, reqType, expectedType icmp.Type, timeout time.Duration, expectResponse bool, seq int) TestResult {
+func runICMPTest(test Test) TestResult {
 	result := TestResult{
-		Name:        name,
-		Destination: dest,
-		RequestType: icmpTypeToString(reqType),
-		Expected:    icmpTypeToString(expectedType),
-		Timestamp:   time.Now(),
+		Name:           test.Name,
+		Destination:    test.Destination,
+		RequestType:    test.RequestType.String(),
+		ExpectedResult: test.ExpectedResult,
+		Timestamp:      time.Now(),
 	}
-	// Use the process ID as the ID.
-	id := os.Getpid() & 0xffff
+
+	fail := func(format string, args ...interface{}) TestResult {
+		result.Status = "FAILED"
+		result.Details = fmt.Sprintf(format, args...)
+		return result
+	}
 
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("ListenPacket error: %v", err)
-		return result
+		return fail("[error] test name: %s, ListenPacket error: %v", test.Name, err)
 	}
 	defer conn.Close()
 
-	dst, err := net.ResolveIPAddr("ip4", dest)
+	dst, err := net.ResolveIPAddr("ip4", test.Destination)
 	if err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("ResolveIPAddr error: %v", err)
-		return result
+		return fail("[error] test name: %s, ResolveIPAddr error: %v", test.Name, err)
 	}
 
-	msg, err := createICMPMessage(reqType, id, seq)
+	msg, err := createICMPMessage(test.RequestType, test.ID, test.Seq)
 	if err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("createICMPMessage error: %v", err)
-		return result
+		return fail("[error] test name: %s, createICMPMessage error: %v", test.Name, err)
 	}
 
 	b, err := msg.Marshal(nil)
 	if err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("message marshal error: %v", err)
-		return result
+		return fail("[error] test name: %s, message marshal error: %v", test.Name, err)
 	}
 
 	start := time.Now()
 	n, err := conn.WriteTo(b, dst)
 	if err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("WriteTo error: %v", err)
-		return result
+		return fail("WriteTo error: %v", err)
 	}
 	if n != len(b) {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("sent %d bytes, expected %d", n, len(b))
-		return result
+		return fail("sent %d bytes, expected %d", n, len(b))
 	}
 
-	// Set the read deadline.
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(test.Timeout)
 	if err = conn.SetReadDeadline(deadline); err != nil {
-		result.Status = "FAILED"
-		result.Details = fmt.Sprintf("SetReadDeadline error: %v", err)
-		return result
+		return fail("SetReadDeadline error: %v", err)
 	}
 
 	resp := make([]byte, 1500)
-	// Loop until we get a matching response or timeout.
 	for {
 		n, peer, err := conn.ReadFrom(resp)
 		elapsed := time.Since(start)
 		if err != nil {
+			// timeout
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				if expectResponse {
-					result.Status = "FAILED"
-					result.Details = fmt.Sprintf("expected response, but timed out after %v waiting for matching message", timeout)
-					result.Actual = "timeout"
-				} else {
-					result.Status = "PASSED"
-					result.Details = fmt.Sprintf("expected timeout occurred (after %v)", timeout)
-					result.Actual = "timeout"
-				}
 				result.Duration = elapsed
+				result.ActualResult = "timeout"
+				if test.ExpectedResult != "timeout" {
+					return fail("expected response, but timed out after %v waiting for matching message", test.Timeout)
+				}
+				result.Status = "PASSED"
+				result.Details = fmt.Sprintf("expected timeout occurred (after %v)", test.Timeout)
 				return result
 			}
-			result.Status = "FAILED"
-			result.Details = fmt.Sprintf("ReadFrom error: %v", err)
 			result.Duration = elapsed
-			return result
+			return fail("ReadFrom error: %v", err)
 		}
 
 		parsedMsg, err := icmp.ParseMessage(1, resp[:n])
 		if err != nil {
-			// Ignore malformed messages.
+			// if the message is not ICMP, ignore it
 			continue
 		}
 
-		// Check if the received message matches our (ID, Seq).
-		matched := false
+		var matched bool
 		switch body := parsedMsg.Body.(type) {
 		case *icmp.Echo:
-			if body.ID == id && body.Seq == seq {
-				matched = true
-			}
+			matched = (body.ID == test.ID && body.Seq == test.Seq)
 		case *icmpTimestamp:
-			if body.ID == id && body.Seq == seq {
-				matched = true
-			}
+			matched = (body.ID == test.ID && body.Seq == test.Seq)
 		case *icmp.RawBody:
-			raw := body.Data
-			if len(raw) >= 4 {
-				replyID := int(raw[0])<<8 | int(raw[1])
-				replySeq := int(raw[2])<<8 | int(raw[3])
-				if replyID == id && replySeq == seq {
-					matched = true
-				}
+			if len(body.Data) >= 4 {
+				replyID := int(body.Data[0])<<8 | int(body.Data[1])
+				replySeq := int(body.Data[2])<<8 | int(body.Data[3])
+				matched = (replyID == test.ID && replySeq == test.Seq)
 			}
 		}
 		if !matched {
-			// Not our message; ignore and keep waiting.
+			// ignore non-matching messages
 			continue
 		}
 
-		// Matching message found.
 		result.Duration = elapsed
-		result.Actual = icmpTypeToString(parsedMsg.Type)
-		if parsedMsg.Type != expectedType {
-			result.Status = "FAILED"
-			result.Details = fmt.Sprintf("unexpected ICMP type: got %v from %v, expected %v",
-				icmpTypeToString(parsedMsg.Type), peer, icmpTypeToString(expectedType))
-		} else {
-			result.Status = "PASSED"
-			result.Details = fmt.Sprintf("received expected response %v from %v", icmpTypeToString(parsedMsg.Type), peer)
+		result.ActualResult = fmt.Sprintf("%s", parsedMsg.Type)
+
+		expectedICMPResponseType, err := getICMPResponseType(test)
+		if err != nil || parsedMsg.Type != expectedICMPResponseType {
+			return fail("received unexpected response %s from %v", parsedMsg.Type, peer)
 		}
+
+		result.Status = "PASSED"
+		result.Details = fmt.Sprintf("received expected response %s from %v", parsedMsg.Type, peer)
 		return result
 	}
 }
 
-// determineICMPTypes returns the request and expected response types based on the test.
-func determineICMPTypes(test Test) (icmp.Type, icmp.Type, error) {
-	switch test.Req {
+// getICMPResponseType returns expected response types based on the test.
+func getICMPResponseType(test Test) (ipv4.ICMPType, error) {
+	switch test.RequestType.String() {
 	case "echo":
-		return ipv4.ICMPTypeEcho, ipv4.ICMPTypeEchoReply, nil
+		return ipv4.ICMPTypeEchoReply, nil
 	case "timestamp":
-		reqType := ipv4.ICMPTypeTimestamp
-		ip := net.ParseIP(test.Dest)
+		ip := net.ParseIP(test.Destination)
 		if ip != nil && ip.IsLoopback() {
-			return reqType, ipv4.ICMPTypeTimestamp, nil
+			return ipv4.ICMPTypeTimestamp, nil
 		}
-		return reqType, ipv4.ICMPTypeTimestampReply, nil
+		return ipv4.ICMPTypeTimestampReply, nil
 	default:
-		return nil, nil, fmt.Errorf("unsupported request type: %s", test.Req)
+		return 99, fmt.Errorf("unsupported ICMP type: %s", test.RequestType) // 99 is an invalid ICMP type
 	}
 }
 
@@ -300,6 +281,30 @@ func parseExpectedResult(expected string) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("unsupported expected result: %s", expected)
+	}
+}
+func parseICMPRequestType(reqType string) (ipv4.ICMPType, error) {
+	switch reqType {
+	case "echo":
+		return ipv4.ICMPTypeEcho, nil
+	case "timestamp":
+		return ipv4.ICMPTypeTimestamp, nil
+	default:
+		return 99, fmt.Errorf("unsupported request type: %s", reqType) // 99 is an invalid ICMP type
+	}
+}
+
+func buildFailedTestResult(testInput TestInput, details string) TestResult {
+	return TestResult{
+		Name:           testInput.Name,
+		Destination:    testInput.Destination,
+		RequestType:    testInput.RequestType,
+		ExpectedResult: testInput.ExpectedResult,
+		ActualResult:   "N/A",
+		Duration:       0,
+		Status:         "FAILED",
+		Details:        details,
+		Timestamp:      time.Now(),
 	}
 }
 
@@ -338,65 +343,43 @@ func main() {
 	// Launch tests concurrently.
 	for i, test := range config.Tests {
 		wg.Add(1)
-		sem <- struct{}{} // acquire semaphore
-		go func(i int, test Test) {
-			defer wg.Done()
-			duration, err := time.ParseDuration(test.Timeout)
-			if err != nil {
-				results[i] = TestResult{
-					Name:        test.Name,
-					Destination: test.Dest,
-					RequestType: test.Req,
-					Expected:    "N/A",
-					Actual:      "N/A",
-					Duration:    0,
-					Status:      "FAILED",
-					Details:     fmt.Sprintf("invalid timeout %q: %v", test.Timeout, err),
-					Timestamp:   time.Now(),
-				}
-				<-sem // release semaphore
-				return
-			}
-
-			reqType, expectedType, err := determineICMPTypes(test)
-			if err != nil {
-				results[i] = TestResult{
-					Name:        test.Name,
-					Destination: test.Dest,
-					RequestType: test.Req,
-					Expected:    "N/A",
-					Actual:      "N/A",
-					Duration:    0,
-					Status:      "FAILED",
-					Details:     err.Error(),
-					Timestamp:   time.Now(),
-				}
+		sem <- struct{}{}
+		go func(i int, testInput TestInput) {
+			defer func() {
+				wg.Done()
 				<-sem
+			}()
+
+			if testInput.ExpectedResult != "response" && testInput.ExpectedResult != "timeout" {
+				results[i] = buildFailedTestResult(testInput,
+					fmt.Sprintf("invalid expected_result: %q", testInput.ExpectedResult))
 				return
 			}
 
-			expectResponse, err := parseExpectedResult(test.Expected)
+			duration, err := time.ParseDuration(testInput.Timeout)
 			if err != nil {
-				results[i] = TestResult{
-					Name:        test.Name,
-					Destination: test.Dest,
-					RequestType: test.Req,
-					Expected:    "N/A",
-					Actual:      "N/A",
-					Duration:    0,
-					Status:      "FAILED",
-					Details:     err.Error(),
-					Timestamp:   time.Now(),
-				}
-				<-sem
+				results[i] = buildFailedTestResult(testInput,
+					fmt.Sprintf("invalid timeout %q: %v", testInput.Timeout, err))
 				return
 			}
 
-			// Use (i+1) as the sequence number (unique per test).
-			seq := i + 1
-			res := runICMPTest(test.Name, test.Dest, reqType, expectedType, duration, expectResponse, seq)
-			results[i] = res
-			<-sem // release semaphore
+			reqType, err := parseICMPRequestType(testInput.RequestType)
+			if err != nil {
+				results[i] = buildFailedTestResult(testInput, err.Error())
+				return
+			}
+
+			test := Test{
+				Name:           testInput.Name,
+				Destination:    testInput.Destination,
+				ID:             pid,
+				Seq:            i + 1,
+				RequestType:    reqType,
+				Timeout:        duration,
+				ExpectedResult: testInput.ExpectedResult,
+			}
+
+			results[i] = runICMPTest(test)
 		}(i, test)
 	}
 	wg.Wait()
@@ -415,8 +398,8 @@ func main() {
 			fmt.Printf("Running test: %s\n", res.Name)
 			fmt.Printf("Destination: %s\n", res.Destination)
 			fmt.Printf("Request Type: %s\n", res.RequestType)
-			fmt.Printf("Expected Result: %s\n", res.Expected)
-			fmt.Printf("Actual Result: %s\n", res.Actual)
+			fmt.Printf("Expected Result: %s\n", res.ExpectedResult)
+			fmt.Printf("Actual Result: %s\n", res.ActualResult)
 			fmt.Printf("Status: %s\n", res.Status)
 			fmt.Printf("Details: %s\n", res.Details)
 			fmt.Printf("Timestamp: %s\n", res.Timestamp.Format(time.RFC3339Nano))

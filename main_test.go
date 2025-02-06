@@ -11,7 +11,7 @@ import (
 // TestICMPTypeToString verifies that icmpTypeToString returns the expected strings.
 func TestICMPTypeToString(t *testing.T) {
 	tests := []struct {
-		in       icmp.Type
+		in       ipv4.ICMPType
 		expected string
 	}{
 		{ipv4.ICMPTypeEcho, "echo request"},
@@ -76,69 +76,6 @@ func TestCreateICMPMessageTimestamp(t *testing.T) {
 	}
 }
 
-// TestDetermineICMPTypes_Echo verifies determineICMPTypes for an echo test.
-func TestDetermineICMPTypes_Echo(t *testing.T) {
-	testCase := Test{
-		Name:     "Test Echo",
-		Dest:     "8.8.8.8",
-		Req:      "echo",
-		Timeout:  "2s",
-		Expected: "response",
-	}
-	req, resp, err := determineICMPTypes(testCase)
-	if err != nil {
-		t.Fatalf("determineICMPTypes error: %v", err)
-	}
-	if req != ipv4.ICMPTypeEcho {
-		t.Errorf("expected request type %v; got %v", ipv4.ICMPTypeEcho, req)
-	}
-	if resp != ipv4.ICMPTypeEchoReply {
-		t.Errorf("expected response type %v; got %v", ipv4.ICMPTypeEchoReply, resp)
-	}
-}
-
-// TestDetermineICMPTypes_TimestampLoopback verifies determineICMPTypes for a timestamp test using a loopback address.
-func TestDetermineICMPTypes_TimestampLoopback(t *testing.T) {
-	testCase := Test{
-		Name:     "Test Timestamp Loopback",
-		Dest:     "127.0.0.1",
-		Req:      "timestamp",
-		Timeout:  "2s",
-		Expected: "response",
-	}
-	req, resp, err := determineICMPTypes(testCase)
-	if err != nil {
-		t.Fatalf("determineICMPTypes error: %v", err)
-	}
-	if req != ipv4.ICMPTypeTimestamp {
-		t.Errorf("expected request type %v; got %v", ipv4.ICMPTypeTimestamp, req)
-	}
-	if resp != ipv4.ICMPTypeTimestamp {
-		t.Errorf("expected response type %v; got %v", ipv4.ICMPTypeTimestamp, resp)
-	}
-}
-
-// TestDetermineICMPTypes_TimestampNonLoopback verifies determineICMPTypes for a timestamp test using a non-loopback address.
-func TestDetermineICMPTypes_TimestampNonLoopback(t *testing.T) {
-	testCase := Test{
-		Name:     "Test Timestamp NonLoopback",
-		Dest:     "8.8.8.8",
-		Req:      "timestamp",
-		Timeout:  "2s",
-		Expected: "response",
-	}
-	req, resp, err := determineICMPTypes(testCase)
-	if err != nil {
-		t.Fatalf("determineICMPTypes error: %v", err)
-	}
-	if req != ipv4.ICMPTypeTimestamp {
-		t.Errorf("expected request type %v; got %v", ipv4.ICMPTypeTimestamp, req)
-	}
-	if resp != ipv4.ICMPTypeTimestampReply {
-		t.Errorf("expected response type %v; got %v", ipv4.ICMPTypeTimestampReply, resp)
-	}
-}
-
 // TestParseExpectedResult verifies that parseExpectedResult returns the correct boolean.
 func TestParseExpectedResult(t *testing.T) {
 	r, err := parseExpectedResult("response")
@@ -155,5 +92,56 @@ func TestParseExpectedResult(t *testing.T) {
 	}
 	if r != false {
 		t.Error("expected false for timeout")
+	}
+}
+
+// TestGetICMPResponseType verifies that getICMPResponseType returns the correct ICMP response type.
+func TestGetICMPResponseType(t *testing.T) {
+	tests := []struct {
+		test     Test
+		expected ipv4.ICMPType
+		err      bool
+	}{
+		{
+			test: Test{
+				RequestType: ipv4.ICMPTypeEcho,
+			},
+			expected: ipv4.ICMPTypeEchoReply,
+			err:      false,
+		},
+		{
+			test: Test{
+				RequestType: ipv4.ICMPTypeTimestamp,
+				Destination: "127.0.0.1",
+			},
+			expected: ipv4.ICMPTypeTimestamp,
+			err:      false,
+		},
+		{
+			test: Test{
+				RequestType: ipv4.ICMPTypeTimestamp,
+				Destination: "8.8.8.8",
+			},
+			expected: ipv4.ICMPTypeTimestampReply,
+			err:      false,
+		},
+		{
+			test: Test{
+				RequestType: ipv4.ICMPType(99),
+			},
+			expected: 99,
+			err:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		got, err := getICMPResponseType(tc.test)
+		if (err != nil) != tc.err {
+			t.Errorf("getICMPResponseType(%v) error = %v, wantErr %v", tc.test, err, tc.err)
+			continue
+		}
+		if got != tc.expected {
+			t.Errorf("getICMPResponseType(%v) = %v, want %v", tc.test, got, tc.expected)
+		}
 	}
 }

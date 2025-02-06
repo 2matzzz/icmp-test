@@ -1,9 +1,10 @@
 general:
-  output: "json"  # "text" or "json"
+  output: "text"  # "text" or "json"
+  parallelism: 1  # Number of concurrent tests
 
 tests:
   - name: "Google Echo Test"
     dest: "8.8.8.8"
-    req: "echo"
+    request_type: "echo" # "echo" or "timestamp"
+    expected_result: "response" # "response" or "timeout"
     timeout: "2s"
-    expected: "response"
