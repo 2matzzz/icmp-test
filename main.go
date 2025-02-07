@@ -15,19 +15,23 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// GeneralConfig holds general configuration options.
-type GeneralConfig struct {
-	Output      string `yaml:"output"`      // "text" or "json"
-	Parallelism int    `yaml:"parallelism"` // Number of tests to run concurrently
+type generalConfig struct {
+	Output                *string `yaml:"output"`         // "text" or "json"
+	Parallelism           *int    `yaml:"parallelism"`    // Number of tests to run concurrently
+	TOS                   *int    `yaml:"tos"`            // Type of Service (TOS) value
+	InterfaceName         *string `yaml:"interface_name"` // Network interface name
+	Interface             net.Interface
+	SourceIPAddressString *string `yaml:"source_ip"` // Source IP address
+	SourceIPAddress       net.IP
 }
 
-// TestInput defines the structure for a single test scenario.
-type TestInput struct {
-	Name           string `yaml:"name"`            // Test name
-	Destination    string `yaml:"dest"`            // Destination IP address
-	RequestType    string `yaml:"request_type"`    // Request type ("echo" or "timestamp")
-	ExpectedResult string `yaml:"expected_result"` // Expected result ("response" or "timeout")
-	Timeout        string `yaml:"timeout"`         // Timeout duration (e.g., "2s")
+// testInput defines the structure for a single test scenario.
+type testInput struct {
+	Name           string  `yaml:"name"`            // Test name
+	Destination    string  `yaml:"dest"`            // Destination IP address
+	RequestType    string  `yaml:"request_type"`    // Request type ("echo" or "timestamp")
+	ExpectedResult string  `yaml:"expected_result"` // Expected result ("response" or "timeout")
+	Timeout        *string `yaml:"timeout"`         // Timeout duration (e.g., "2s")
 }
 
 type Test struct {
@@ -42,8 +46,8 @@ type Test struct {
 
 // Config defines the YAML configuration structure.
 type Config struct {
-	General GeneralConfig `yaml:"general"`
-	Tests   []TestInput   `yaml:"tests"`
+	General generalConfig `yaml:"general"`
+	Tests   []testInput   `yaml:"tests"`
 }
 
 // icmpTimestamp represents the ICMP Timestamp message body.
@@ -58,6 +62,13 @@ type icmpTimestamp struct {
 }
 
 var pid = os.Getpid() & 0xffff
+
+const (
+	defaultOutput      = "text"
+	defaultParallelism = 1
+	defaultTOS         = 0
+	defaultTimeout     = "1s"
+)
 
 // Len returns the length of the ICMP Timestamp message body.
 func (t *icmpTimestamp) Len(_ int) int {
@@ -148,7 +159,7 @@ type TestResult struct {
 
 // runICMPTest sends an ICMP request and waits until a reply with a matching (ID, Seq) is received.
 // It ignores any replies whose (ID, Seq) pair does not match the one sent. The overall timeout is applied.
-func runICMPTest(test Test) TestResult {
+func runICMPTest(config *Config, test Test) TestResult {
 	result := TestResult{
 		Name:           test.Name,
 		Destination:    test.Destination,
@@ -163,15 +174,31 @@ func runICMPTest(test Test) TestResult {
 		return result
 	}
 
-	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	localAddr := &net.IPAddr{IP: config.General.SourceIPAddress}
+
+	ipconn, err := net.ListenIP("ip4:icmp", localAddr)
 	if err != nil {
-		return fail("[error] test name: %s, ListenPacket error: %v", test.Name, err)
+		log.Fatalf("ListenIP failed: %v\n", err)
 	}
-	defer conn.Close()
+	defer ipconn.Close()
+
+	pconn := ipv4.NewPacketConn(ipconn)
+	if err := pconn.SetTOS(*config.General.TOS); err != nil {
+		log.Fatalf("SetTOS failed: %v\n", err)
+	}
+
+	if err := pconn.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		log.Fatalf("SetControlMessage failed: %v\n", err)
+	}
 
 	dst, err := net.ResolveIPAddr("ip4", test.Destination)
 	if err != nil {
 		return fail("[error] test name: %s, ResolveIPAddr error: %v", test.Name, err)
+	}
+
+	cm := &ipv4.ControlMessage{
+		IfIndex: config.General.Interface.Index,
+		Src:     config.General.SourceIPAddress,
 	}
 
 	msg, err := createICMPMessage(test.RequestType, test.ID, test.Seq)
@@ -185,7 +212,7 @@ func runICMPTest(test Test) TestResult {
 	}
 
 	start := time.Now()
-	n, err := conn.WriteTo(b, dst)
+	n, err := pconn.WriteTo(b, cm, dst)
 	if err != nil {
 		return fail("WriteTo error: %v", err)
 	}
@@ -194,13 +221,14 @@ func runICMPTest(test Test) TestResult {
 	}
 
 	deadline := time.Now().Add(test.Timeout)
-	if err = conn.SetReadDeadline(deadline); err != nil {
+	if err = pconn.SetReadDeadline(deadline); err != nil {
 		return fail("SetReadDeadline error: %v", err)
 	}
 
 	resp := make([]byte, 1500)
 	for {
-		n, peer, err := conn.ReadFrom(resp)
+		// ignore control message for now
+		n, _, peer, err := pconn.ReadFrom(resp)
 		elapsed := time.Since(start)
 		if err != nil {
 			// timeout
@@ -294,7 +322,7 @@ func parseICMPRequestType(reqType string) (ipv4.ICMPType, error) {
 	}
 }
 
-func buildFailedTestResult(testInput TestInput, details string) TestResult {
+func buildFailedTestResult(testInput testInput, details string) TestResult {
 	return TestResult{
 		Name:           testInput.Name,
 		Destination:    testInput.Destination,
@@ -308,43 +336,217 @@ func buildFailedTestResult(testInput TestInput, details string) TestResult {
 	}
 }
 
-func main() {
-	configFile := flag.String("config", "config.yaml", "Path to YAML test configuration file")
-	flag.Parse()
-
-	data, err := os.ReadFile(*configFile)
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatalf("config file read error: %v", err)
+		return nil, fmt.Errorf("config file read error: %w", err)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		log.Fatalf("YAML unmarshal error: %v", err)
+	var input Config
+	if err := yaml.Unmarshal(data, &input); err != nil {
+		return nil, fmt.Errorf("YAML unmarshal error: %w", err)
 	}
 
-	outputMode := config.General.Output
-	if outputMode == "" {
-		outputMode = "text"
+	var cfg Config
+
+	if input.General.Output == nil {
+		// Allocate memory for the pointer and set the default value.
+		cfg.General.Output = new(string)
+		*cfg.General.Output = defaultOutput
+	} else {
+		// Check for valid values.
+		if *input.General.Output != "text" && *input.General.Output != "json" {
+			return nil, fmt.Errorf("invalid output value: %s. It must be 'text' or 'json'", *input.General.Output)
+		}
+		// Use the provided output.
+		cfg.General.Output = input.General.Output
 	}
 
-	// Determine the maximum number of concurrent jobs.
-	maxConcurrent := config.General.Parallelism
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
+	if input.General.Parallelism == nil || *input.General.Parallelism <= 0 {
+		cfg.General.Parallelism = new(int)
+		*cfg.General.Parallelism = defaultParallelism
+	} else {
+		cfg.General.Parallelism = input.General.Parallelism
+	}
+
+	if input.General.TOS == nil {
+		cfg.General.TOS = new(int)
+		*cfg.General.TOS = defaultTOS
+	} else {
+		if *input.General.TOS < 0 || *input.General.TOS > 255 {
+			return nil, fmt.Errorf("invalid TOS value in general configuration: %d. It must be between 0 and 255", *input.General.TOS)
+		}
+		cfg.General.TOS = input.General.TOS
+	}
+
+	cfg.General.Interface, cfg.General.SourceIPAddress = determineNetworkInterfaceAndIPAddress(input)
+
+	if len(input.Tests) == 0 {
+		return nil, fmt.Errorf("no test scenarios found")
+	}
+	cfg.Tests = input.Tests
+	return &cfg, nil
+}
+
+func getIfaceFromInterfaceName(interfaceName string) (*net.Interface, error) {
+	if interfaceName == "" {
+		return nil, fmt.Errorf("interface name is empty")
+	}
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return nil, fmt.Errorf("InterfaceByName(%s) failed: %v\n", interfaceName, err)
+	}
+	return iface, nil
+}
+
+func determineNetworkInterfaceAndIPAddress(input Config) (net.Interface, net.IP) {
+	// interface name and source IP address not specified
+	if input.General.InterfaceName == nil && input.General.SourceIPAddressString == nil {
+		// lookup default interface
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			log.Fatalf("Interfaces() failed: %v\n", err)
+		}
+		if len(ifaces) == 0 {
+			log.Fatalf("No network interfaces found\n")
+		}
+		iface := ifaces[0]
+		addrs, err := iface.Addrs()
+		if err != nil {
+			log.Fatalf("Failed to get addresses for interface %s: %v\n", iface.Name, err)
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			return iface, ip
+		}
+	}
+
+	// interface name specified, but source IP address not specified
+	if input.General.InterfaceName != nil && input.General.SourceIPAddressString == nil {
+		iface, err := getIfaceFromInterfaceName(*input.General.InterfaceName)
+		if err != nil {
+			log.Fatalf("%s", err)
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			log.Fatalf("Failed to get addresses for interface %s: %v\n", *input.General.InterfaceName, err)
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			return *iface, ip
+		}
+	}
+
+	// source IP address specified, but interface name not specified
+	if input.General.InterfaceName == nil && input.General.SourceIPAddressString != nil {
+		sourceIP := net.ParseIP(*input.General.SourceIPAddressString)
+		if sourceIP == nil {
+			log.Fatalf("Invalid source IP address: %s\n", *input.General.SourceIPAddressString)
+		}
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			log.Fatalf("Interfaces() failed: %v\n", err)
+		}
+		for _, iface := range ifaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				log.Fatalf("Failed to get addresses for interface %s: %v\n", iface.Name, err)
+			}
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip == nil || ip.To4() == nil {
+					continue
+				}
+				if ip.Equal(sourceIP) {
+					return iface, sourceIP
+				}
+			}
+			log.Fatalf("No network interface found with IP address %s\n", sourceIP)
+		}
+	}
+
+	// both interface name and source IP address specified
+	if input.General.InterfaceName != nil && input.General.SourceIPAddressString != nil {
+		iface, err := getIfaceFromInterfaceName(*input.General.InterfaceName)
+		if err != nil {
+			log.Fatalf("%s", err)
+		}
+		sourceIP := net.ParseIP(*input.General.SourceIPAddressString)
+		if sourceIP == nil {
+			log.Fatalf("Invalid source IP address: %s\n", *input.General.SourceIPAddressString)
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			log.Fatalf("Failed to get addresses for interface %s: %v\n", *input.General.InterfaceName, err)
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			if ip.Equal(sourceIP) {
+				return *iface, sourceIP
+			}
+		}
+		log.Fatalf("No network interface found with IP address %s\n", sourceIP)
+	}
+	log.Fatalf("Failed to determine network interface and source IP address\n")
+	return net.Interface{}, nil // unreachable
+}
+
+func main() {
+	configFilePath := flag.String("config", "config.yaml", "Path to YAML test configuration file")
+	if configFilePath == nil {
+		log.Fatalf("config file is required")
+	}
+	flag.Parse()
+	config, err := loadConfig(*configFilePath)
+	if err != nil {
+		log.Fatalf("config load error: %v", err)
 	}
 
 	var (
 		results   = make([]TestResult, len(config.Tests))
 		allPassed = true
 		wg        sync.WaitGroup
-		sem       = make(chan struct{}, maxConcurrent) // semaphore to limit concurrency
+		sem       = make(chan struct{}, *config.General.Parallelism) // semaphore to limit concurrency
 	)
 
 	// Launch tests concurrently.
 	for i, test := range config.Tests {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(i int, testInput TestInput) {
+		go func(i int, testInput testInput) {
 			defer func() {
 				wg.Done()
 				<-sem
@@ -356,10 +558,23 @@ func main() {
 				return
 			}
 
-			duration, err := time.ParseDuration(testInput.Timeout)
+			var timeout string
+			if testInput.Timeout == nil {
+				timeout = defaultTimeout
+			} else {
+				timeout = *testInput.Timeout
+			}
+
+			duration, err := time.ParseDuration(timeout)
+			// Check if the timeout is valid.
 			if err != nil {
 				results[i] = buildFailedTestResult(testInput,
-					fmt.Sprintf("invalid timeout %q: %v", testInput.Timeout, err))
+					fmt.Sprintf("invalid timeout %q: %v", timeout, err))
+				return
+			}
+			if duration <= 0 || duration > 10*time.Second {
+				results[i] = buildFailedTestResult(testInput,
+					fmt.Sprintf("invalid timeout %q: must be between 1ms and 10s", timeout))
 				return
 			}
 
@@ -379,7 +594,7 @@ func main() {
 				ExpectedResult: testInput.ExpectedResult,
 			}
 
-			results[i] = runICMPTest(test)
+			results[i] = runICMPTest(config, test)
 		}(i, test)
 	}
 	wg.Wait()
@@ -393,7 +608,7 @@ func main() {
 	}
 
 	// Output the results.
-	if outputMode == "text" {
+	if *config.General.Output == "text" {
 		for _, res := range results {
 			fmt.Printf("Running test: %s\n", res.Name)
 			fmt.Printf("Destination: %s\n", res.Destination)
@@ -405,7 +620,7 @@ func main() {
 			fmt.Printf("Timestamp: %s\n", res.Timestamp.Format(time.RFC3339Nano))
 			fmt.Println()
 		}
-	} else if outputMode == "json" {
+	} else if *config.General.Output == "json" {
 		b, err := json.MarshalIndent(results, "", "  ")
 		if err != nil {
 			log.Fatalf("JSON marshal error: %v", err)

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
+	"net"
 	"os"
+	"strings"
 	"testing"
 
 	"golang.org/x/net/icmp"
@@ -143,5 +146,266 @@ func TestGetICMPResponseType(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("getICMPResponseType(%v) = %v, want %v", tc.test, got, tc.expected)
 		}
+	}
+}
+
+func getValidInterfaceAndIP(t *testing.T) (string, string) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("Unable to get network interfaces: ", err)
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			return iface.Name, ip.String()
+		}
+	}
+	t.Skip("No valid network interface with IPv4 found")
+	return "", ""
+}
+
+// TestLoadConfigValid verifies that a valid YAML configuration file is loaded correctly.
+func TestLoadConfigValid(t *testing.T) {
+	ifaceName, ipStr := getValidInterfaceAndIP(t)
+
+	// Prepare a YAML configuration content with valid values.
+	yamlContent := fmt.Sprintf(`
+general:
+  output: "json"
+  parallelism: 4
+  tos: 100
+  interfaceName: "%s"
+  sourceIPAddress: "%s"
+tests:
+  - name: "scenario1"
+`, ifaceName, ipStr)
+
+	// Write the YAML content to a temporary file.
+	tmpfile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(yamlContent)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	cfg, err := loadConfig(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Expected no error, but got: %v", err)
+	}
+
+	// Validate each configuration field.
+	if cfg.General.Output == nil || *cfg.General.Output != "json" {
+		t.Errorf("Expected output to be 'json', got: %v", cfg.General.Output)
+	}
+	if cfg.General.Parallelism == nil || *cfg.General.Parallelism != 4 {
+		t.Errorf("Expected parallelism to be 4, got: %v", cfg.General.Parallelism)
+	}
+	if cfg.General.TOS == nil || *cfg.General.TOS != 100 {
+		t.Errorf("Expected TOS to be 100, got: %v", cfg.General.TOS)
+	}
+	if len(cfg.Tests) != 1 || cfg.Tests[0].Name != "scenario1" {
+		t.Errorf("Expected tests to be ['scenario1'], got: %v", cfg.Tests)
+	}
+
+	// Verify that the network interface and source IP are set correctly.
+	if cfg.General.Interface.Name != ifaceName {
+		t.Errorf("Expected interface to be %s, got: %s", ifaceName, cfg.General.Interface.Name)
+	}
+	if cfg.General.SourceIPAddress == nil || cfg.General.SourceIPAddress.String() != ipStr {
+		t.Errorf("Expected source IP to be %s, got: %v", ipStr, cfg.General.SourceIPAddress)
+	}
+}
+
+// TestLoadConfigInvalidOutput checks that an invalid output value results in an error.
+func TestLoadConfigInvalidOutput(t *testing.T) {
+	ifaceName, ipStr := getValidInterfaceAndIP(t)
+
+	yamlContent := fmt.Sprintf(`
+general:
+  output: "xml"
+  parallelism: 4
+  tos: 100
+  interfaceName: "%s"
+  sourceIPAddress: "%s"
+tests:
+  - name: "scenario1"
+`, ifaceName, ipStr)
+
+	tmpfile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+	if _, err := tmpfile.Write([]byte(yamlContent)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	_, err = loadConfig(tmpfile.Name())
+	if err == nil {
+		t.Fatal("Expected an error for invalid output value, but got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid output value") {
+		t.Errorf("Expected error message to contain 'invalid output value', got: %v", err)
+	}
+}
+
+// TestLoadConfigInvalidTOS checks that an out-of-range TOS value results in an error.
+func TestLoadConfigInvalidTOS(t *testing.T) {
+	ifaceName, ipStr := getValidInterfaceAndIP(t)
+
+	yamlContent := fmt.Sprintf(`
+general:
+  output: "json"
+  parallelism: 4
+  tos: 300
+  interfaceName: "%s"
+  sourceIPAddress: "%s"
+tests:
+  - name: "scenario1"
+`, ifaceName, ipStr)
+
+	tmpfile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+	if _, err := tmpfile.Write([]byte(yamlContent)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	_, err = loadConfig(tmpfile.Name())
+	if err == nil {
+		t.Fatal("Expected an error for invalid TOS value, but got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid TOS value") {
+		t.Errorf("Expected error message to contain 'invalid TOS value', got: %v", err)
+	}
+}
+
+// TestLoadConfigNoTests checks that an empty tests section results in an error.
+func TestLoadConfigNoTests(t *testing.T) {
+	ifaceName, ipStr := getValidInterfaceAndIP(t)
+
+	yamlContent := fmt.Sprintf(`
+general:
+  output: "json"
+  parallelism: 4
+  tos: 100
+  interfaceName: "%s"
+  sourceIPAddress: "%s"
+tests: []
+`, ifaceName, ipStr)
+
+	tmpfile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+	if _, err := tmpfile.Write([]byte(yamlContent)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	_, err = loadConfig(tmpfile.Name())
+	if err == nil {
+		t.Fatal("Expected an error for empty tests section, but got nil")
+	}
+	if !strings.Contains(err.Error(), "no test scenarios found") {
+		t.Errorf("Expected error message to contain 'no test scenarios found', got: %v", err)
+	}
+}
+
+// TestGetIfaceFromInterfaceName verifies the behavior of getIfaceFromInterfaceName for valid and invalid interface names.
+func TestGetIfaceFromInterfaceName(t *testing.T) {
+	ifaceName, _ := getValidInterfaceAndIP(t)
+	// Test with a valid interface name.
+	iface, err := getIfaceFromInterfaceName(ifaceName)
+	if err != nil {
+		t.Fatalf("Expected no error for a valid interface name, but got: %v", err)
+	}
+	if iface.Name != ifaceName {
+		t.Errorf("Expected interface name %s, got %s", ifaceName, iface.Name)
+	}
+
+	// Test with an empty string.
+	_, err = getIfaceFromInterfaceName("")
+	if err == nil {
+		t.Fatal("Expected an error for empty interface name, but got nil")
+	}
+
+	// Test with a non-existent interface name.
+	_, err = getIfaceFromInterfaceName("nonexistent_interface_12345")
+	if err == nil {
+		t.Fatal("Expected an error for a non-existent interface name, but got nil")
+	}
+}
+
+// TestDetermineNetworkInterfaceAndIPAddress_BothSpecified verifies the behavior when both interfaceName and sourceIPAddress are specified.
+func TestDetermineNetworkInterfaceAndIPAddress_BothSpecified(t *testing.T) {
+	ifaceName, ipStr := getValidInterfaceAndIP(t)
+	cfg := Config{
+		General: generalConfig{
+			InterfaceName:         &ifaceName,
+			SourceIPAddressString: &ipStr,
+		},
+	}
+
+	iface, ip := determineNetworkInterfaceAndIPAddress(cfg)
+	if iface.Name != ifaceName {
+		t.Errorf("Expected interface name %s, got %s", ifaceName, iface.Name)
+	}
+	if ip == nil || ip.String() != ipStr {
+		t.Errorf("Expected IP %s, got %v", ipStr, ip)
+	}
+}
+
+// TestDetermineNetworkInterfaceAndIPAddress_InterfaceOnly verifies the behavior when only interfaceName is specified.
+func TestDetermineNetworkInterfaceAndIPAddress_InterfaceOnly(t *testing.T) {
+	ifaceName, _ := getValidInterfaceAndIP(t)
+	cfg := Config{
+		General: generalConfig{
+			InterfaceName: &ifaceName,
+		},
+	}
+	iface, ip := determineNetworkInterfaceAndIPAddress(cfg)
+	if iface.Name != ifaceName {
+		t.Errorf("Expected interface name %s, got %s", ifaceName, iface.Name)
+	}
+	if ip == nil || ip.To4() == nil {
+		t.Errorf("Expected a valid IPv4 address for interface %s, got: %v", ifaceName, ip)
+	}
+}
+
+// TestDetermineNetworkInterfaceAndIPAddress_NeitherSpecified verifies the behavior when neither interfaceName nor sourceIPAddress is specified.
+// Note: This branch returns the first valid interface found on the system.
+func TestDetermineNetworkInterfaceAndIPAddress_NeitherSpecified(t *testing.T) {
+	cfg := Config{
+		General: generalConfig{},
+	}
+	iface, ip := determineNetworkInterfaceAndIPAddress(cfg)
+	if ip == nil || ip.To4() == nil {
+		t.Errorf("Expected a valid IPv4 address, got: %v", ip)
+	}
+	if iface.Name == "" {
+		t.Errorf("Expected a valid interface, got: %v", iface)
 	}
 }

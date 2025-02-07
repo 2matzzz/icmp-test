@@ -1,10 +1,13 @@
 general:
-  output: "text"  # "text" or "json"
-  parallelism: 1  # Number of concurrent tests
+  output: "text"  # Output format "text" or "json" (optional)
+  parallelism: 1  # Number of concurrent tests (optional)
+  tos: 0x00  # Type of Service (TOS) field in IP header (optional)
+  interface_name: "eth0"  # Network interface name (optional)
+  interface_address: "192.168.0.1" # Network interface address (optional)
 
 tests:
   - name: "Google Echo Test"
     dest: "8.8.8.8"
     request_type: "echo" # "echo" or "timestamp"
     expected_result: "response" # "response" or "timeout"
-    timeout: "2s"
+    timeout: "2s"  # Timeout for the test (default 1s)
