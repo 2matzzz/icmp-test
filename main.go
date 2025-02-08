@@ -231,7 +231,7 @@ func runICMPTest(config *Config, test Test) TestResult {
 		n, _, peer, err := pconn.ReadFrom(resp)
 		elapsed := time.Since(start)
 		if err != nil {
-			// timeout
+			// timeout occurred
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				result.Duration = elapsed
 				result.ActualResult = "timeout"
@@ -270,8 +270,14 @@ func runICMPTest(config *Config, test Test) TestResult {
 			continue
 		}
 
+		// At this point, we have received a matching reply.
 		result.Duration = elapsed
 		result.ActualResult = fmt.Sprintf("%s", parsedMsg.Type)
+
+		// Check if a response was not expected.
+		if test.ExpectedResult == "timeout" {
+			return fail("received response %s from %v, but expected timeout", parsedMsg.Type, peer)
+		}
 
 		expectedICMPResponseType, err := getICMPResponseType(test)
 		if err != nil || parsedMsg.Type != expectedICMPResponseType {
