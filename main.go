@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -16,13 +17,34 @@ import (
 )
 
 type generalConfig struct {
-	Output                *string `yaml:"output"`         // "text" or "json"
-	Parallelism           *int    `yaml:"parallelism"`    // Number of tests to run concurrently
-	TOS                   *int    `yaml:"tos"`            // Type of Service (TOS) value
+	Output                string `yaml:"output"`      // "text" or "json"
+	Parallelism           int    `yaml:"parallelism"` // Number of tests to run concurrently
+	TOS                   int    `yaml:"tos"`
+	InterfaceName         string `yaml:"interface_name"` // Network interface name
+	Interface             net.Interface
+	SourceIPAddressString string `yaml:"source_ip"` // Source IP address
+	SourceIPAddress       net.IP
+}
+
+// Config defines the YAML configuration structure.
+type Config struct {
+	General generalConfig `yaml:"general"`
+	Tests   []testInput   `yaml:"tests"`
+}
+
+type inputGeneralConfig struct {
+	Output                *string `yaml:"output"`      // "text" or "json"
+	Parallelism           *int    `yaml:"parallelism"` // Number of tests to run concurrently
+	TOS                   *string `yaml:"tos"`
 	InterfaceName         *string `yaml:"interface_name"` // Network interface name
 	Interface             net.Interface
 	SourceIPAddressString *string `yaml:"source_ip"` // Source IP address
 	SourceIPAddress       net.IP
+}
+
+type inputConfig struct {
+	General inputGeneralConfig `yaml:"general"`
+	Tests   []testInput        `yaml:"tests"`
 }
 
 // testInput defines the structure for a single test scenario.
@@ -42,12 +64,6 @@ type Test struct {
 	RequestType    ipv4.ICMPType
 	Timeout        time.Duration
 	ExpectedResult string
-}
-
-// Config defines the YAML configuration structure.
-type Config struct {
-	General generalConfig `yaml:"general"`
-	Tests   []testInput   `yaml:"tests"`
 }
 
 // icmpTimestamp represents the ICMP Timestamp message body.
@@ -183,7 +199,7 @@ func runICMPTest(config *Config, test Test) TestResult {
 	defer ipconn.Close()
 
 	pconn := ipv4.NewPacketConn(ipconn)
-	if err := pconn.SetTOS(*config.General.TOS); err != nil {
+	if err := pconn.SetTOS(config.General.TOS); err != nil {
 		log.Fatalf("SetTOS failed: %v\n", err)
 	}
 
@@ -348,7 +364,7 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file read error: %w", err)
 	}
 
-	var input Config
+	var input inputConfig
 	if err := yaml.Unmarshal(data, &input); err != nil {
 		return nil, fmt.Errorf("YAML unmarshal error: %w", err)
 	}
@@ -357,32 +373,30 @@ func loadConfig(path string) (*Config, error) {
 
 	if input.General.Output == nil {
 		// Allocate memory for the pointer and set the default value.
-		cfg.General.Output = new(string)
-		*cfg.General.Output = defaultOutput
+		cfg.General.Output = defaultOutput
 	} else {
 		// Check for valid values.
 		if *input.General.Output != "text" && *input.General.Output != "json" {
 			return nil, fmt.Errorf("invalid output value: %s. It must be 'text' or 'json'", *input.General.Output)
 		}
 		// Use the provided output.
-		cfg.General.Output = input.General.Output
+		cfg.General.Output = *input.General.Output
 	}
 
 	if input.General.Parallelism == nil || *input.General.Parallelism <= 0 {
-		cfg.General.Parallelism = new(int)
-		*cfg.General.Parallelism = defaultParallelism
+		cfg.General.Parallelism = defaultParallelism
 	} else {
-		cfg.General.Parallelism = input.General.Parallelism
+		cfg.General.Parallelism = *input.General.Parallelism
 	}
 
 	if input.General.TOS == nil {
-		cfg.General.TOS = new(int)
-		*cfg.General.TOS = defaultTOS
+		cfg.General.TOS = defaultTOS
 	} else {
-		if *input.General.TOS < 0 || *input.General.TOS > 255 {
-			return nil, fmt.Errorf("invalid TOS value in general configuration: %d. It must be between 0 and 255", *input.General.TOS)
+		tosValue, err := strconv.ParseInt(*input.General.TOS, 0, 16)
+		if err != nil || tosValue < 0 || tosValue > 255 {
+			return nil, fmt.Errorf("invalid TOS value in general configuration: %s. It must be a number or hex string (like '0x00') between 0 and 255", *input.General.TOS)
 		}
-		cfg.General.TOS = input.General.TOS
+		cfg.General.TOS = int(tosValue)
 	}
 
 	cfg.General.Interface, cfg.General.SourceIPAddress = determineNetworkInterfaceAndIPAddress(input)
@@ -405,7 +419,7 @@ func getIfaceFromInterfaceName(interfaceName string) (*net.Interface, error) {
 	return iface, nil
 }
 
-func determineNetworkInterfaceAndIPAddress(input Config) (net.Interface, net.IP) {
+func determineNetworkInterfaceAndIPAddress(input inputConfig) (net.Interface, net.IP) {
 	// interface name and source IP address not specified
 	if input.General.InterfaceName == nil && input.General.SourceIPAddressString == nil {
 		// lookup default interface
@@ -545,7 +559,7 @@ func main() {
 		results   = make([]TestResult, len(config.Tests))
 		allPassed = true
 		wg        sync.WaitGroup
-		sem       = make(chan struct{}, *config.General.Parallelism) // semaphore to limit concurrency
+		sem       = make(chan struct{}, config.General.Parallelism) // semaphore to limit concurrency
 	)
 
 	// Launch tests concurrently.
@@ -614,7 +628,7 @@ func main() {
 	}
 
 	// Output the results.
-	if *config.General.Output == "text" {
+	if config.General.Output == "text" {
 		for _, res := range results {
 			fmt.Printf("Running test: %s\n", res.Name)
 			fmt.Printf("Destination: %s\n", res.Destination)
@@ -626,7 +640,7 @@ func main() {
 			fmt.Printf("Timestamp: %s\n", res.Timestamp.Format(time.RFC3339Nano))
 			fmt.Println()
 		}
-	} else if *config.General.Output == "json" {
+	} else if config.General.Output == "json" {
 		b, err := json.MarshalIndent(results, "", "  ")
 		if err != nil {
 			log.Fatalf("JSON marshal error: %v", err)
