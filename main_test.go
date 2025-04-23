@@ -211,13 +211,13 @@ tests:
 	}
 
 	// Validate each configuration field.
-	if cfg.General.Output == nil || *cfg.General.Output != "json" {
+	if cfg.General.Output != "json" {
 		t.Errorf("Expected output to be 'json', got: %v", cfg.General.Output)
 	}
-	if cfg.General.Parallelism == nil || *cfg.General.Parallelism != 4 {
+	if cfg.General.Parallelism != 4 {
 		t.Errorf("Expected parallelism to be 4, got: %v", cfg.General.Parallelism)
 	}
-	if cfg.General.TOS == nil || *cfg.General.TOS != 100 {
+	if cfg.General.TOS != 100 {
 		t.Errorf("Expected TOS to be 100, got: %v", cfg.General.TOS)
 	}
 	if len(cfg.Tests) != 1 || cfg.Tests[0].Name != "scenario1" {
@@ -362,8 +362,8 @@ func TestGetIfaceFromInterfaceName(t *testing.T) {
 // TestDetermineNetworkInterfaceAndIPAddress_BothSpecified verifies the behavior when both interfaceName and sourceIPAddress are specified.
 func TestDetermineNetworkInterfaceAndIPAddress_BothSpecified(t *testing.T) {
 	ifaceName, ipStr := getValidInterfaceAndIP(t)
-	cfg := Config{
-		General: generalConfig{
+	cfg := inputConfig{
+		General: inputGeneralConfig{
 			InterfaceName:         &ifaceName,
 			SourceIPAddressString: &ipStr,
 		},
@@ -381,8 +381,8 @@ func TestDetermineNetworkInterfaceAndIPAddress_BothSpecified(t *testing.T) {
 // TestDetermineNetworkInterfaceAndIPAddress_InterfaceOnly verifies the behavior when only interfaceName is specified.
 func TestDetermineNetworkInterfaceAndIPAddress_InterfaceOnly(t *testing.T) {
 	ifaceName, _ := getValidInterfaceAndIP(t)
-	cfg := Config{
-		General: generalConfig{
+	cfg := inputConfig{
+		General: inputGeneralConfig{
 			InterfaceName: &ifaceName,
 		},
 	}
@@ -398,8 +398,8 @@ func TestDetermineNetworkInterfaceAndIPAddress_InterfaceOnly(t *testing.T) {
 // TestDetermineNetworkInterfaceAndIPAddress_NeitherSpecified verifies the behavior when neither interfaceName nor sourceIPAddress is specified.
 // Note: This branch returns the first valid interface found on the system.
 func TestDetermineNetworkInterfaceAndIPAddress_NeitherSpecified(t *testing.T) {
-	cfg := Config{
-		General: generalConfig{},
+	cfg := inputConfig{
+		General: inputGeneralConfig{},
 	}
 	iface, ip := determineNetworkInterfaceAndIPAddress(cfg)
 	if ip == nil || ip.To4() == nil {
