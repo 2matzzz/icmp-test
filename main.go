@@ -392,7 +392,7 @@ func loadConfig(path string) (*Config, error) {
 	if input.General.TOS == nil {
 		cfg.General.TOS = defaultTOS
 	} else {
-		tosValue, err := strconv.ParseInt(*input.General.TOS, 0, 16)
+		tosValue, err := strconv.ParseInt(*input.General.TOS, 0, 8)
 		if err != nil || tosValue < 0 || tosValue > 255 {
 			return nil, fmt.Errorf("invalid TOS value in general configuration: %s. It must be a number or hex string (like '0x00') between 0 and 255", *input.General.TOS)
 		}
