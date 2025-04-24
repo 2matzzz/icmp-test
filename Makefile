@@ -8,12 +8,17 @@ GOFMT=$(GOCMD) fmt
 GOMOD=$(GOCMD) mod tidy
 BINARY_NAME=icmp-test
 
+# OS (can be overridden: e.g. make build GOOS=linux)
+GOOS ?= linux
+# Architecture (can be overridden: e.g. make build GOARCH=arm64)
+GOARCH ?= arm64
+
 # Directories
 SRC_DIR=./...
 
 # Build the project
 build: tidy
-	$(GOBUILD) -o $(BINARY_NAME) $(SRC_DIR)
+	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GOBUILD) -o $(BINARY_NAME) $(SRC_DIR)
 
 # Run tests
 test:
