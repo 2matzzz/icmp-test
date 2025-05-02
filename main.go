@@ -296,8 +296,19 @@ func runICMPTest(config *Config, test Test) TestResult {
 		}
 
 		expectedICMPResponseType, err := getICMPResponseType(test)
-		if err != nil || parsedMsg.Type != expectedICMPResponseType {
-			return fail("received unexpected response %s from %v", parsedMsg.Type, peer)
+		if err != nil {
+			continue
+		}
+		if parsedMsg.Type != expectedICMPResponseType {
+			isSelf := false
+			ip := net.ParseIP(test.Destination)
+			if ip != nil && (ip.IsLoopback() || ip.Equal(config.General.SourceIPAddress)) {
+				isSelf = true
+			}
+			if isSelf && (parsedMsg.Type == ipv4.ICMPTypeEcho || parsedMsg.Type == ipv4.ICMPTypeTimestamp) {
+				continue
+			}
+			return fail("received unexpected ICMP type %s from %v (expected %s)", parsedMsg.Type, peer, expectedICMPResponseType)
 		}
 
 		result.Status = "PASSED"
