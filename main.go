@@ -162,26 +162,30 @@ func createICMPMessage(reqType ipv4.ICMPType, id, seq int) (*icmp.Message, error
 
 // TestResult holds the result of a test scenario.
 type TestResult struct {
-	Name           string        `json:"name"`
-	Destination    string        `json:"destination"`
-	RequestType    string        `json:"request_type"`
-	ExpectedResult string        `json:"expected_result"`
-	ActualResult   string        `json:"actual_result"`
-	Duration       time.Duration `json:"duration"`
-	Status         string        `json:"status"` // "PASSED" or "FAILED"
-	Details        string        `json:"details,omitempty"`
-	Timestamp      time.Time     `json:"timestamp"`
+	Name            string        `json:"name"`
+	Destination     string        `json:"destination"`
+	RequestType     string        `json:"request_type"`
+	ExpectedResult  string        `json:"expected_result"`
+	ActualResult    string        `json:"actual_result"`
+	Duration        time.Duration `json:"duration"`
+	Status          string        `json:"status"` // "PASSED" or "FAILED"
+	Details         string        `json:"details,omitempty"`
+	Timestamp       time.Time     `json:"timestamp"`
+	SourceInterface string        `json:"source_interface"`
+	SourceIPAddress string        `json:"source_ip_address"`
 }
 
 // runICMPTest sends an ICMP request and waits until a reply with a matching (ID, Seq) is received.
 // It ignores any replies whose (ID, Seq) pair does not match the one sent. The overall timeout is applied.
 func runICMPTest(config *Config, test Test) TestResult {
 	result := TestResult{
-		Name:           test.Name,
-		Destination:    test.Destination,
-		RequestType:    test.RequestType.String(),
-		ExpectedResult: test.ExpectedResult,
-		Timestamp:      time.Now(),
+		Name:            test.Name,
+		Destination:     test.Destination,
+		RequestType:     test.RequestType.String(),
+		ExpectedResult:  test.ExpectedResult,
+		Timestamp:       time.Now(),
+		SourceInterface: config.General.Interface.Name,
+		SourceIPAddress: config.General.SourceIPAddress.String(),
 	}
 
 	fail := func(format string, args ...interface{}) TestResult {
@@ -381,6 +385,49 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	var cfg Config
+
+	if input.General.InterfaceName != nil {
+		iface, err := getIfaceFromInterfaceName(*input.General.InterfaceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interface %s: %v", *input.General.InterfaceName, err)
+		}
+		input.General.Interface = *iface
+	} else {
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get interfaces: %v", err)
+		}
+		if len(ifaces) == 0 {
+			return nil, fmt.Errorf("no network interfaces found")
+		}
+		input.General.Interface = ifaces[0]
+	}
+	if input.General.SourceIPAddressString != nil {
+		sourceIP := net.ParseIP(*input.General.SourceIPAddressString)
+		if sourceIP == nil {
+			return nil, fmt.Errorf("invalid source IP address: %s", *input.General.SourceIPAddressString)
+		}
+		input.General.SourceIPAddress = sourceIP
+	} else {
+		addrs, err := input.General.Interface.Addrs()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get addresses for interface %s: %v", input.General.Interface.Name, err)
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			input.General.SourceIPAddress = ip
+			break
+		}
+	}
 
 	if input.General.Output == nil {
 		// Allocate memory for the pointer and set the default value.
