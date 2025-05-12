@@ -472,7 +472,7 @@ func getIfaceFromInterfaceName(interfaceName string) (*net.Interface, error) {
 	}
 	iface, err := net.InterfaceByName(interfaceName)
 	if err != nil {
-		return nil, fmt.Errorf("InterfaceByName(%s) failed: %v\n", interfaceName, err)
+		return nil, fmt.Errorf("InterfaceByName(%s) failed: %v", interfaceName, err)
 	}
 	return iface, nil
 }
