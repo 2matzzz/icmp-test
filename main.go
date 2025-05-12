@@ -163,6 +163,8 @@ func createICMPMessage(reqType ipv4.ICMPType, id, seq int) (*icmp.Message, error
 // TestResult holds the result of a test scenario.
 type TestResult struct {
 	Name            string        `json:"name"`
+	SourceInterface string        `json:"source_interface"`
+	SourceIPAddress string        `json:"source_ip_address"`
 	Destination     string        `json:"destination"`
 	RequestType     string        `json:"request_type"`
 	ExpectedResult  string        `json:"expected_result"`
@@ -171,8 +173,6 @@ type TestResult struct {
 	Status          string        `json:"status"` // "PASSED" or "FAILED"
 	Details         string        `json:"details,omitempty"`
 	Timestamp       time.Time     `json:"timestamp"`
-	SourceInterface string        `json:"source_interface"`
-	SourceIPAddress string        `json:"source_ip_address"`
 }
 
 // runICMPTest sends an ICMP request and waits until a reply with a matching (ID, Seq) is received.
@@ -690,6 +690,8 @@ func main() {
 		for _, res := range results {
 			fmt.Printf("Running test: %s\n", res.Name)
 			fmt.Printf("Destination: %s\n", res.Destination)
+			fmt.Printf("Source IP: %s\n", res.SourceIPAddress)
+			fmt.Printf("Source Interface: %s\n", res.SourceInterface)
 			fmt.Printf("Request Type: %s\n", res.RequestType)
 			fmt.Printf("Expected Result: %s\n", res.ExpectedResult)
 			fmt.Printf("Actual Result: %s\n", res.ActualResult)
