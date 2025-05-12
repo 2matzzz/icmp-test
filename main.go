@@ -24,6 +24,7 @@ type generalConfig struct {
 	Interface             net.Interface
 	SourceIPAddressString string `yaml:"source_ip"` // Source IP address
 	SourceIPAddress       net.IP
+	ResultFilter          []string `yaml:"result_filter"`
 }
 
 // Config defines the YAML configuration structure.
@@ -40,6 +41,7 @@ type inputGeneralConfig struct {
 	Interface             net.Interface
 	SourceIPAddressString *string `yaml:"source_ip"` // Source IP address
 	SourceIPAddress       net.IP
+	ResultFilter          *[]string `yaml:"result_filter"`
 }
 
 type inputConfig struct {
@@ -459,6 +461,10 @@ func loadConfig(path string) (*Config, error) {
 
 	cfg.General.Interface, cfg.General.SourceIPAddress = determineNetworkInterfaceAndIPAddress(input)
 
+	if input.General.ResultFilter != nil {
+		cfg.General.ResultFilter = *input.General.ResultFilter
+	}
+
 	if len(input.Tests) == 0 {
 		return nil, fmt.Errorf("no test scenarios found")
 	}
@@ -604,9 +610,6 @@ func determineNetworkInterfaceAndIPAddress(input inputConfig) (net.Interface, ne
 
 func main() {
 	configFilePath := flag.String("config", "config.yaml", "Path to YAML test configuration file")
-	if configFilePath == nil {
-		log.Fatalf("config file is required")
-	}
 	flag.Parse()
 	config, err := loadConfig(*configFilePath)
 	if err != nil {
@@ -685,9 +688,24 @@ func main() {
 		}
 	}
 
+	// フィルタリング処理
+	filteredResults := results
+	if len(config.General.ResultFilter) > 0 {
+		tmp := []TestResult{}
+		for _, res := range results {
+			for _, status := range config.General.ResultFilter {
+				if res.Status == status {
+					tmp = append(tmp, res)
+					break
+				}
+			}
+		}
+		filteredResults = tmp
+	}
+
 	// Output the results.
 	if config.General.Output == "text" {
-		for _, res := range results {
+		for _, res := range filteredResults {
 			fmt.Printf("Running test: %s\n", res.Name)
 			fmt.Printf("Destination: %s\n", res.Destination)
 			fmt.Printf("Source IP: %s\n", res.SourceIPAddress)
@@ -701,7 +719,7 @@ func main() {
 			fmt.Println()
 		}
 	} else if config.General.Output == "json" {
-		b, err := json.MarshalIndent(results, "", "  ")
+		b, err := json.MarshalIndent(filteredResults, "", "  ")
 		if err != nil {
 			log.Fatalf("JSON marshal error: %v", err)
 		}

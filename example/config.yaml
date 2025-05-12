@@ -4,6 +4,9 @@ general:
   tos: 0x00  # Type of Service (TOS) field in IP header (optional)
   interface_name: "eth0"  # Network interface name (optional)
   interface_address: "192.168.0.1" # Network interface address (optional)
+  result_filter:
+    - "PASSED"
+    - "FAILED"
 
 tests:
   - name: "Google Echo Test"
