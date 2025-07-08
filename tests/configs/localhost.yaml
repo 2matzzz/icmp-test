@@ -1,0 +1,24 @@
+# Localhost test configuration
+# Local tests with minimal network latency
+
+general:
+  output: "text"
+  parallelism: 1
+  tos: 0x00
+  interface_name: "lo0"  # Local interface
+  set_df_bit: false
+
+tests:
+  - name: "Localhost - Basic Echo"
+    dest: "127.0.0.1"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "1s"
+    payload_size: 32
+
+  - name: "Localhost - Large Payload"
+    dest: "127.0.0.1"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "2s"
+    payload_size: 2000

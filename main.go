@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -25,6 +26,7 @@ type generalConfig struct {
 	SourceIPAddressString string `yaml:"source_ip"` // Source IP address
 	SourceIPAddress       net.IP
 	ResultFilter          []string `yaml:"result_filter"`
+	SetDFBit              bool     `yaml:"set_df_bit"` // Set Don't Fragment bit in IP header
 }
 
 // Config defines the YAML configuration structure.
@@ -42,6 +44,7 @@ type inputGeneralConfig struct {
 	SourceIPAddressString *string `yaml:"source_ip"` // Source IP address
 	SourceIPAddress       net.IP
 	ResultFilter          *[]string `yaml:"result_filter"`
+	SetDFBit              *bool     `yaml:"set_df_bit"` // Set Don't Fragment bit in IP header
 }
 
 type inputConfig struct {
@@ -56,6 +59,7 @@ type testInput struct {
 	RequestType    string  `yaml:"request_type"`    // Request type ("echo" or "timestamp")
 	ExpectedResult string  `yaml:"expected_result"` // Expected result ("response" or "timeout")
 	Timeout        *string `yaml:"timeout"`         // Timeout duration (e.g., "2s")
+	PayloadSize    *int    `yaml:"payload_size"`    // ICMP echo payload size in bytes
 }
 
 type Test struct {
@@ -66,6 +70,7 @@ type Test struct {
 	RequestType    ipv4.ICMPType
 	Timeout        time.Duration
 	ExpectedResult string
+	PayloadSize    int
 }
 
 // icmpTimestamp represents the ICMP Timestamp message body.
@@ -86,6 +91,13 @@ const (
 	defaultParallelism = 1
 	defaultTOS         = 0
 	defaultTimeout     = "1s"
+	defaultPayloadSize = 32
+	defaultSetDFBit    = false
+
+	// Socket options for DF bit setting
+	IP_DONTFRAG     = 28 // macOS: Don't fragment flag
+	IP_MTU_DISCOVER = 10 // Linux: Path MTU discovery option
+	IP_PMTUDISC_DO  = 2  // Linux: Always send DF bit
 )
 
 // Len returns the length of the ICMP Timestamp message body.
@@ -115,30 +127,22 @@ func (t *icmpTimestamp) Marshal(_ int) ([]byte, error) {
 	return b, nil
 }
 
-// icmpTypeToString converts an ICMP type to a descriptive string.
-func icmpTypeToString(t ipv4.ICMPType) string {
-	switch t {
-	case ipv4.ICMPTypeEcho:
-		return "echo request"
-	case ipv4.ICMPTypeEchoReply:
-		return "echo reply"
-	case ipv4.ICMPTypeTimestamp:
-		return "timestamp"
-	case ipv4.ICMPTypeTimestampReply:
-		return "timestamp reply"
-	default:
-		return fmt.Sprintf("type %d", t.Protocol())
-	}
-}
-
 // createICMPMessage builds an ICMP message based on the provided request type,
-// using the given id and sequence number.
-func createICMPMessage(reqType ipv4.ICMPType, id, seq int) (*icmp.Message, error) {
+// using the given id, sequence number, and payload size.
+func createICMPMessage(reqType ipv4.ICMPType, id, seq, payloadSize int) (*icmp.Message, error) {
 	if reqType == ipv4.ICMPTypeEcho {
+		// Create payload data with specified size
+		data := make([]byte, payloadSize)
+		// Fill with [0-9a-z] pattern (36 characters total)
+		pattern := "0123456789abcdefghijklmnopqrstuvwxyz"
+		for i := 0; i < payloadSize; i++ {
+			data[i] = pattern[i%len(pattern)]
+		}
+
 		echo := &icmp.Echo{
 			ID:   id,
 			Seq:  seq,
-			Data: []byte("PING"),
+			Data: data,
 		}
 		return &icmp.Message{
 			Type: reqType,
@@ -204,6 +208,21 @@ func runICMPTest(config *Config, test Test) TestResult {
 	}
 	defer ipconn.Close()
 
+	// Set DF bit at socket level if requested
+	if config.General.SetDFBit {
+		if rawConn, err := ipconn.SyscallConn(); err == nil {
+			rawConn.Control(func(fd uintptr) {
+				// Try to set IP_DONTFRAG (macOS) or IP_MTU_DISCOVER (Linux)
+				if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, IP_DONTFRAG, 1); err != nil {
+					// On Linux, try IP_MTU_DISCOVER with IP_PMTUDISC_DO
+					if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO); err != nil {
+						log.Printf("Warning: Failed to set DF bit: %v", err)
+					}
+				}
+			})
+		}
+	}
+
 	pconn := ipv4.NewPacketConn(ipconn)
 	if err := pconn.SetTOS(config.General.TOS); err != nil {
 		log.Fatalf("SetTOS failed: %v\n", err)
@@ -223,7 +242,21 @@ func runICMPTest(config *Config, test Test) TestResult {
 		Src:     config.General.SourceIPAddress,
 	}
 
-	msg, err := createICMPMessage(test.RequestType, test.ID, test.Seq)
+	// Check if fragmentation is needed based on interface MTU
+	mtu := config.General.Interface.MTU
+	maxPayloadSize := mtu - 28 // 20 bytes IP header + 8 bytes ICMP header
+
+	start := time.Now()
+
+	if config.General.SetDFBit && test.PayloadSize > maxPayloadSize {
+		// DF bit is set and payload exceeds MTU - this will likely result in ICMP error
+		// Still attempt to send, but expect potential failure
+		fmt.Printf("Warning: DF bit set with payload size %d exceeding MTU %d. May receive ICMP error.\n",
+			test.PayloadSize, maxPayloadSize)
+	}
+
+	// Create and send ICMP message (kernel handles fragmentation automatically if needed)
+	msg, err := createICMPMessage(test.RequestType, test.ID, test.Seq, test.PayloadSize)
 	if err != nil {
 		return fail("[error] test name: %s, createICMPMessage error: %v", test.Name, err)
 	}
@@ -233,7 +266,7 @@ func runICMPTest(config *Config, test Test) TestResult {
 		return fail("[error] test name: %s, message marshal error: %v", test.Name, err)
 	}
 
-	start := time.Now()
+	// Send ICMP packet - kernel will fragment automatically if needed and DF bit is not set
 	n, err := pconn.WriteTo(b, cm, dst)
 	if err != nil {
 		return fail("WriteTo error: %v", err)
@@ -339,17 +372,6 @@ func getICMPResponseType(test Test) (ipv4.ICMPType, error) {
 	}
 }
 
-// parseExpectedResult returns whether a response is expected.
-func parseExpectedResult(expected string) (bool, error) {
-	switch expected {
-	case "response":
-		return true, nil
-	case "timeout":
-		return false, nil
-	default:
-		return false, fmt.Errorf("unsupported expected result: %s", expected)
-	}
-}
 func parseICMPRequestType(reqType string) (ipv4.ICMPType, error) {
 	switch reqType {
 	case "echo":
@@ -463,6 +485,12 @@ func loadConfig(path string) (*Config, error) {
 
 	if input.General.ResultFilter != nil {
 		cfg.General.ResultFilter = *input.General.ResultFilter
+	}
+
+	if input.General.SetDFBit == nil {
+		cfg.General.SetDFBit = defaultSetDFBit
+	} else {
+		cfg.General.SetDFBit = *input.General.SetDFBit
 	}
 
 	if len(input.Tests) == 0 {
@@ -665,6 +693,18 @@ func main() {
 				return
 			}
 
+			// Set payload size (default to 32 bytes if not specified)
+			payloadSize := defaultPayloadSize
+			if testInput.PayloadSize != nil {
+				payloadSize = *testInput.PayloadSize
+				// Validate payload size (must be positive and reasonable)
+				if payloadSize < 0 || payloadSize > 65507 { // 65507 = 65535 - 20 (IP header) - 8 (ICMP header)
+					results[i] = buildFailedTestResult(testInput,
+						fmt.Sprintf("invalid payload_size %d: must be between 0 and 65507", payloadSize))
+					return
+				}
+			}
+
 			test := Test{
 				Name:           testInput.Name,
 				Destination:    testInput.Destination,
@@ -673,6 +713,7 @@ func main() {
 				RequestType:    reqType,
 				Timeout:        duration,
 				ExpectedResult: testInput.ExpectedResult,
+				PayloadSize:    payloadSize,
 			}
 
 			results[i] = runICMPTest(config, test)
