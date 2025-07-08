@@ -1,0 +1,40 @@
+# DF bit specific test configuration
+# Verifies behavior when DF bit is set
+
+general:
+  output: "text"
+  parallelism: 1
+  tos: 0x00
+  interface_name: "en0"
+  set_df_bit: true  # Set DF bit
+
+tests:
+  # DF bit + small payload (should succeed)
+  - name: "DF Bit - Small Payload (should succeed)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "3s"
+    payload_size: 32
+
+  - name: "DF Bit - Medium Payload (should succeed)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "3s"
+    payload_size: 1000
+
+  # DF bit + large payload (may timeout)
+  - name: "DF Bit - Large Payload (may timeout)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "timeout"  # Expect timeout
+    timeout: "3s"
+    payload_size: 2000
+
+  - name: "DF Bit - Very Large Payload (may timeout)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "timeout"  # Expect timeout
+    timeout: "3s"
+    payload_size: 3000

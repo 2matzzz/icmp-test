@@ -1,11 +1,10 @@
 general:
-  output: "text"  # Output format "text" or "json" (optional)
+  output: "json"  # Output format "text" or "json" (optional)
   parallelism: 1  # Number of concurrent tests (optional)
   tos: 0x00  # Type of Service (TOS) field in IP header (optional)
   interface_name: "eth0"  # Network interface name (optional)
   interface_address: "192.168.0.1" # Network interface address (optional)
   result_filter:
-    - "PASSED"
     - "FAILED"
 
 tests:
@@ -14,3 +13,11 @@ tests:
     request_type: "echo" # "echo" or "timestamp"
     expected_result: "response" # "response" or "timeout"
     timeout: "2s"  # Timeout for the test (default 1s)
+    payload_size: 64  # ICMP echo payload size in bytes (default 32)
+
+  - name: "Large Payload Test (requires fragmentation)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "5s"
+    payload_size: 2000  # Large payload that will be fragmented

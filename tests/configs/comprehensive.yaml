@@ -1,0 +1,54 @@
+# Comprehensive ICMP test configuration
+# Includes basic functionality, payload size, and DF bit tests
+
+general:
+  output: "text"
+  parallelism: 1
+  tos: 0x00
+  interface_name: "en0"
+  set_df_bit: false
+
+tests:
+  # Basic functionality tests
+  - name: "Basic Echo Test - Google DNS"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "3s"
+    payload_size: 32
+
+  - name: "Basic Echo Test - Localhost"
+    dest: "127.0.0.1"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "2s"
+    payload_size: 32
+
+  # Payload size tests
+  - name: "Small Payload (64 bytes)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "3s"
+    payload_size: 64
+
+  - name: "Medium Payload (500 bytes)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "3s"
+    payload_size: 500
+
+  - name: "Large Payload (1400 bytes)"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "response"
+    timeout: "5s"
+    payload_size: 1400
+
+  - name: "Very Large Payload (2000 bytes) - may timeout"
+    dest: "8.8.8.8"
+    request_type: "echo"
+    expected_result: "timeout"  # Large payloads are expected to timeout
+    timeout: "5s"
+    payload_size: 2000
